@@ -5,15 +5,27 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import uuid, json
 
+# Known Agent Builder/Agents origins. Add/remove as needed.
+ALLOWED_ORIGINS = [
+    "https://agents.openai.com",
+    "https://builder.openai.com",
+    "https://platform.openai.com",
+    "https://chat.openai.com",           # sometimes previews/embeds resolve here
+    "https://stackblitz.com",            # for your manual tests
+    "https://*.stackblitz.io",           # SB preview sandboxes
+]
+
 app = FastAPI()
 
-# --- CORS: open for testing (lock down origins later) ---
+# ==== CORS ====
+# We need: allow_credentials=True AND explicit origins (not "*")
+# Also expose the custom header so JS can read it.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # if you want, swap for your exact origin later
-    allow_credentials=False,        # keep False if using "*"
-    allow_methods=["*"],            # include OPTIONS
-    allow_headers=["*"],            # include content-type, mcp-session-id
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["POST", "OPTIONS", "GET"],
+    allow_headers=["content-type", "mcp-session-id"],
     expose_headers=["mcp-session-id"],
 )
 
@@ -52,13 +64,15 @@ def _err(id, code, message, data=None):
         out["error"]["data"] = data
     return out
 
-# --- Explicit preflight handler with explicit headers (fixes strict browsers/proxies) ---
+# Explicit preflight—important with some CDNs/proxies
 @app.options("/mcp")
 def mcp_options(response: Response):
     response.status_code = 204
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    # Echo explicit headers for strict agents:
+    response.headers["Access-Control-Allow-Origin"] = ", ".join(ALLOWED_ORIGINS)
     response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "content-type, mcp-session-id"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Expose-Headers"] = "mcp-session-id"
     return
 
@@ -66,8 +80,7 @@ def mcp_options(response: Response):
 async def mcp(request: Request, response: Response,
               mcp_session_id: Optional[str] = Header(None)):
 
-    # Always echo CORS headers for safety
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    # Defensive: ensure these are present even if middleware is bypassed by an edge
     response.headers["Access-Control-Expose-Headers"] = "mcp-session-id"
 
     try:
@@ -82,7 +95,7 @@ async def mcp(request: Request, response: Response,
         response.status_code = 400
         return _err(None, -32600, "Invalid Request", str(e))
 
-    # initialize: create session and expose header
+    # initialize -> create session and expose header
     if req.method == "initialize":
         try:
             _ = InitializeParams(**(req.params or {}))
@@ -92,9 +105,14 @@ async def mcp(request: Request, response: Response,
         sid = _new_session_id()
         SESSIONS[sid] = {"ready": False}
         response.headers["mcp-session-id"] = sid
-        return _ok(req.id, {"protocolVersion": "2024-11-05", "capabilities": {}})
+        # Also put sessionId in body for human debugging (Agent Builder ignores it, harmless)
+        return _ok(req.id, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "sessionId": sid
+        })
 
-    # after initialize, a valid session id is required
+    # After initialize, a valid session id is required
     if not mcp_session_id or mcp_session_id not in SESSIONS:
         response.status_code = 400
         return _err(req.id, -32000, "Missing or invalid session")
