@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI, Header, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,19 +6,29 @@ from typing import Optional, Dict, Any
 import uuid, json
 
 app = FastAPI()
+
+# --- CORS: open for testing (lock down origins later) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=False,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],            # if you want, swap for your exact origin later
+    allow_credentials=False,        # keep False if using "*"
+    allow_methods=["*"],            # include OPTIONS
+    allow_headers=["*"],            # include content-type, mcp-session-id
     expose_headers=["mcp-session-id"],
 )
 
+# Simple in-memory sessions (demo only)
 SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+@app.get("/")
+def root():
+    return {"service": "MCP demo", "endpoints": ["/health", "/mcp"]}
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
+# ---- JSON-RPC models ----
 class InitializeParams(BaseModel):
     protocolVersion: str
     clientInfo: Dict[str, Any]
@@ -29,21 +40,36 @@ class JsonRpcReq(BaseModel):
     method: str
     params: Optional[Dict[str, Any]] = None
 
-def _new_session_id() -> str: return uuid.uuid4().hex
-def _ok(id, result): return {"jsonrpc":"2.0","id":id,"result":result}
+def _new_session_id() -> str:
+    return uuid.uuid4().hex
+
+def _ok(id, result):
+    return {"jsonrpc":"2.0","id":id,"result":result}
+
 def _err(id, code, message, data=None):
     out = {"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}
-    if data is not None: out["error"]["data"] = data
+    if data is not None:
+        out["error"]["data"] = data
     return out
 
+# --- Explicit preflight handler with explicit headers (fixes strict browsers/proxies) ---
 @app.options("/mcp")
 def mcp_options(response: Response):
     response.status_code = 204
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "content-type, mcp-session-id"
+    response.headers["Access-Control-Expose-Headers"] = "mcp-session-id"
     return
 
 @app.post("/mcp")
 async def mcp(request: Request, response: Response,
               mcp_session_id: Optional[str] = Header(None)):
+
+    # Always echo CORS headers for safety
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "mcp-session-id"
+
     try:
         payload = await request.json()
     except Exception:
@@ -56,6 +82,7 @@ async def mcp(request: Request, response: Response,
         response.status_code = 400
         return _err(None, -32600, "Invalid Request", str(e))
 
+    # initialize: create session and expose header
     if req.method == "initialize":
         try:
             _ = InitializeParams(**(req.params or {}))
@@ -67,6 +94,7 @@ async def mcp(request: Request, response: Response,
         response.headers["mcp-session-id"] = sid
         return _ok(req.id, {"protocolVersion": "2024-11-05", "capabilities": {}})
 
+    # after initialize, a valid session id is required
     if not mcp_session_id or mcp_session_id not in SESSIONS:
         response.status_code = 400
         return _err(req.id, -32000, "Missing or invalid session")
@@ -78,11 +106,20 @@ async def mcp(request: Request, response: Response,
 
     if req.method == "tools/list":
         tools = [
-            {"name":"ping","description":"health check",
-             "inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}},
-            {"name":"get_student_profile","description":"Lookup by student_id",
-             "inputSchema":{"type":"object","required":["student_id"],
-                            "properties":{"student_id":{"type":"string"}}}}
+            {
+                "name":"ping",
+                "description":"health check",
+                "inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}
+            },
+            {
+                "name":"get_student_profile",
+                "description":"Lookup by student_id",
+                "inputSchema":{
+                    "type":"object",
+                    "required":["student_id"],
+                    "properties":{"student_id":{"type":"string"}}
+                }
+            }
         ]
         return _ok(req.id, {"tools": tools})
 
@@ -117,13 +154,15 @@ async def mcp(request: Request, response: Response,
                 obj = FIX[sid]
                 return _ok(req.id, {
                     "content":[{"type":"text","text":json.dumps(obj, ensure_ascii=False)}],
-                    "structuredContent": obj, "isError": False
+                    "structuredContent": obj,
+                    "isError": False
                 })
             else:
                 miss = {"error":"not found","student_id":sid}
                 return _ok(req.id, {
                     "content":[{"type":"text","text":json.dumps(miss, ensure_ascii=False)}],
-                    "structuredContent": miss, "isError": False
+                    "structuredContent": miss,
+                    "isError": False
                 })
 
         return _err(req.id, -32601, f"Unknown tool '{name}'")
