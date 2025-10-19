@@ -129,6 +129,3 @@ async def mcp(request: Request, response: Response,
         return _err(req.id, -32601, f"Unknown tool '{name}'")
 
     return _err(req.id, -32601, f"Unknown method '{req.method}'")
-@app.get("/")
-def root():
-    return {"service": "MCP demo", "endpoints": ["/health", "/mcp"]}
